@@ -1,145 +1,125 @@
-
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
-import { connectDB } from "./db.js";
-import User from "./models/User.js";
-import Visit from "./models/Visit.js";
-
-
-// --- S3 Imports ---
-import { S3Client } from "@aws-sdk/client-s3";
+import { supabase } from "./supabase.js";
 import multer from "multer";
-import multerS3 from "multer-s3";
 import path from "path";
-import shortUUID from "short-uuid"; // For generating ingest_id
+import shortUUID from "short-uuid";
 
 dotenv.config();
 const app = express();
 
-// --- S3 Client Setup ---
-const s3Client = new S3Client({
-  region: process.env.AWS_S3_REGION,
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  },
-});
-
+// --- Storage Setup (Memory Storage for Supabase Upload) ---
 const upload = multer({
-  storage: multerS3({
-    s3: s3Client,
-    bucket: process.env.AWS_S3_BUCKET_NAME,
-    metadata: function (req, file, cb) {
-      cb(null, { fieldName: file.fieldname });
-    },
-    key: function (req, file, cb) {
-      // Construct the S3 key
-      const user = req.user; // We'll add user info to req later via middleware
-      const visitTimestamp = req.body.visit_timestamp || new Date().toISOString().replace(/[:.]/g, '-'); // Use provided or generate
-      const fileType = req.body.documentTypeMap?.[file.originalname] || 'unknown'; // Get type from map sent by frontend
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9); // Better uniqueness to be added.
-      const extension = path.extname(file.originalname);
-      
-      // Example Key: patients/user-clerk-id/visits/2025-10-27T14-00-00-000Z/imaging/some-file-1678886400000-123456789.png
-      const s3Key = `patients/${user.clerkId}/visits/${visitTimestamp}/${fileType}/${path.basename(file.originalname, extension)}-${uniqueSuffix}${extension}`;
-      cb(null, s3Key);
-    },
-  }),
-   limits: { fileSize: 10 * 1024 * 1024 } // Limit file size to 10MB
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
 });
-// --- End S3 Setup ---
-
 
 // CORS configuration
 app.use(
-  cors({
-    origin: "http://localhost:3000", // Frontend API
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"], // Ensure Authorization is allowed if you use Clerk tokens
-    credentials: true,
-    optionsSuccessStatus: 200,
-  })
+    cors({
+        origin: "*", // allow all origins
+        methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allowedHeaders: ["*"], // allow all headers
+        exposedHeaders: ["*"]
+    })
 );
 
-// Other middleware
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // Needed for form data
+app.use(express.urlencoded({ extended: true }));
 
-// --- Simple Middleware to get User from DB based on Clerk ID ---
-// Use Clerk's backend SDK for robust authentication (in real app)
+// --- Middleware to get User from Supabase based on Clerk ID ---
 const getUserMiddleware = async (req, res, next) => {
-    // Assume clerkId is sent in a header or derived from a Clerk token
-    // THIS IS SIMPLISTIC - USE CLERK SDK FOR PRODUCTION
-    const authHeader = req.headers['authorization']; // Example: Bearer <clerk_id>
-    const clerkId = authHeader?.split(' ')[1]; // Highly insecure, just for demo
+    // req.header() is case-insensitive in Express, unlike req.headers[]
+    const authHeader = req.header('Authorization');
+
+    // If it starts with "Bearer ", take the second part. Otherwise, assume the exact string is the token.
+    const clerkId = authHeader?.startsWith('Bearer ') ? authHeader.split(' ')[1] : authHeader;
+
+    console.log("Extracted Clerk ID:", clerkId);
+
+    // --- Completely bypass auth requirement for addUser ---
+    if (req.path === '/addUser' && req.method === 'POST') {
+        return next();
+    }
 
     if (!clerkId) {
-        // If checking status, allow proceeding without user for now
-        if (req.path === '/api/user/status' && req.method === 'GET') {
+        if (req.path === '/user/status' && req.method === 'GET') {
             req.user = null;
             return next();
         }
-         if (req.path === '/api/addUser' && req.method === 'POST') {
-             return next(); // Allow addUser without this middleware
-         }
         return res.status(401).json({ message: 'Unauthorized: No Clerk ID provided' });
     }
+
     try {
-        const user = await User.findOne({ clerkId: clerkId });
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('*')
+            .eq('clerk_id', clerkId)
+            .maybeSingle();
+
+        if (error) throw error;
+
         if (!user) {
-             if (req.path === '/api/user/status' && req.method === 'GET') {
-                req.user = null; // User exists in Clerk but not DB yet
+            if (req.path === '/user/status' && req.method === 'GET') {
+                req.user = null;
                 return next();
             }
             return res.status(404).json({ message: 'User not found in DB' });
         }
-        req.user = user; // Attach user object to request
+        req.user = user;
         next();
     } catch (err) {
         console.error("Middleware error:", err);
         res.status(500).json({ message: "Server error in middleware" });
     }
 };
-app.use('/api', getUserMiddleware); 
-// --- End Middleware ---
 
-
-// Connect Database
-connectDB();
+app.use('/api', getUserMiddleware);
 
 // Routes
 app.get("/", (req, res) => {
-  res.json({ message: "Server running successfully 🚀" });
+    res.json({ message: "Supabase Server running successfully 🚀" });
 });
 
-app.post("/api/addUser", async (req, res) => { // Keep this outside middleware or adjust middleware
-  try {
-    const { clerkId, email, name, role } = req.body;
-    console.log("addUser called with:", { clerkId, email, name, role });
+app.post("/api/addUser", async (req, res) => {
+    try {
+        const { clerkId, email, name, role } = req.body;
 
-    if (!clerkId || !email || !name) {
-         return res.status(400).json({ message: "Missing required fields: clerkId, email, name" });
+        if (!clerkId || !email || !name) {
+            return res.status(400).json({ message: "Missing required fields: clerkId, email, name" });
+        }
+
+        // Check if user exists
+        const { data: existingUser } = await supabase
+            .from('users')
+            .select('*')
+            .eq('clerk_id', clerkId)
+            .maybeSingle();
+
+        if (!existingUser) {
+            // Create user
+            const { data: newUser, error } = await supabase
+                .from('users')
+                .insert({ clerk_id: clerkId, email, name, role: role || 'user' })
+                .select()
+                .single();
+
+            if (error) {
+                if (error.code === '23505') { // Postgres unique violation (e.g. email exists)
+                    return res.status(409).json({ message: "Email already exists" });
+                }
+                throw error;
+            }
+
+            return res.status(201).json({ message: "User created", user: newUser });
+        }
+
+        return res.status(200).json({ message: "User already exists", user: existingUser });
+    } catch (err) {
+        console.error("Add user error:", err);
+        return res.status(500).json({ message: "Server error" });
     }
-
-
-    let user = await User.findOne({ clerkId });
-    if (!user) {
-      user = new User({ clerkId, email, name, role: role || 'user' }); // Ensure role defaults to user
-      await user.save();
-      return res.status(201).json({ message: "User created", user });
-    }
-
-    console.log("user exists");
-    return res.status(200).json({ message: "User already exists", user });
-  } catch (err) {
-    console.error("Add user error:", err);
-     // Check for duplicate key error (if email is unique)
-    if (err.code === 11000) {
-        return res.status(409).json({ message: "Email already exists" });
-    }
-    return res.status(500).json({ message: "Server error" });
-  }
 });
 
 // --- Verification Endpoint ---
@@ -149,22 +129,27 @@ app.post("/api/user/verify", async (req, res) => {
     try {
         const { name, age, budget, availabilityDays, visaStatus } = req.body;
 
-        // Basic Validation
-        if (!name || !age || !budget || !availabilityDays || !visaStatus ) {
+        if (!name || !age || !budget || !availabilityDays || !visaStatus) {
             return res.status(400).json({ message: "Missing verification fields" });
         }
 
-        req.user.name = name; // Update name if provided differently
-        req.user.age = parseInt(age, 10);
-        req.user.budget = budget;
-        req.user.availabilityDays = parseInt(availabilityDays, 10);
-        req.user.visaStatus = visaStatus;
-        req.user.isVerified = true;
+        const { data: updatedUser, error } = await supabase
+            .from('users')
+            .update({
+                name,
+                age: parseInt(age, 10),
+                budget,
+                availability_days: parseInt(availabilityDays, 10),
+                visa_status: visaStatus,
+                is_verified: true
+            })
+            .eq('id', req.user.id)
+            .select()
+            .single();
 
-        await req.user.save();
+        if (error) throw error;
 
-        res.status(200).json({ message: "User verified successfully", user: req.user });
-
+        res.status(200).json({ message: "User verified successfully", user: updatedUser });
     } catch (err) {
         console.error("Verification error:", err);
         res.status(500).json({ message: "Server error during verification" });
@@ -173,28 +158,31 @@ app.post("/api/user/verify", async (req, res) => {
 
 // --- User Status Endpoint ---
 app.get("/api/user/status", (req, res) => {
-    // Middleware attaches req.user if found
     if (req.user) {
         res.status(200).json({
-            isVerified: req.user.isVerified || false,
-            clerkId: req.user.clerkId,
-             userId: req.user._id // Send MongoDB ID too
-            // Add other details if needed by frontend
+            isVerified: req.user.is_verified || false,
+            clerkId: req.user.clerk_id,
+            userId: req.user.id
         });
     } else {
-         // If middleware didn't find user (even if clerkId was sent), means not in DB
-         // Or if no clerkId sent at all.
         res.status(200).json({ isVerified: false, clerkId: null, userId: null });
     }
 });
-
 
 // --- Get Visits Endpoint ---
 app.get("/api/visits", async (req, res) => {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
 
     try {
-        const visits = await Visit.find({ user: req.user._id }).sort({ visit_timestamp: -1 }); // Sort by most recent
+        // Fetch visits with associated ingests
+        const { data: visits, error } = await supabase
+            .from('visits')
+            .select('*, ingests(*)')
+            .eq('user_id', req.user.id)
+            .order('visit_timestamp', { ascending: false });
+
+        if (error) throw error;
+
         res.status(200).json(visits);
     } catch (err) {
         console.error("Error fetching visits:", err);
@@ -202,60 +190,102 @@ app.get("/api/visits", async (req, res) => {
     }
 });
 
-
 // --- Create Visit Endpoint (Handles File Uploads) ---
-// Use upload.array('medicalDocs', 5) to accept up to 5 files with field name 'medicalDocs' (upload is present in multer)
 app.post("/api/visits", upload.array('medicalDocs', 5), async (req, res) => {
     if (!req.user) return res.status(401).json({ message: "Unauthorized" });
-    if (!req.user.isVerified) return res.status(403).json({ message: "User not verified" });
+    if (!req.user.is_verified) return res.status(403).json({ message: "User not verified" });
 
     try {
         const { chief_complaint, visit_type, documentTypeMap } = req.body;
-         const parsedDocumentTypeMap = JSON.parse(documentTypeMap || '{}'); // Frontend sends map of originalFilename -> type
+        const parsedDocumentTypeMap = JSON.parse(documentTypeMap || '{}');
 
         if (!chief_complaint) {
             return res.status(400).json({ message: "Chief complaint is required." });
         }
 
-         const visitTimestamp = new Date(); // Use server time for consistency
+        const visitTimestamp = new Date();
+        const bucketName = process.env.SUPABASE_BUCKET_NAME || 'medical-docs';
 
-        // Create ingest data from uploaded files (req.files is populated by multer-s3)
-        const ingests = req.files.map(file => ({
-            ingest_id: shortUUID.generate(), // Generate a unique ID
-            type: parsedDocumentTypeMap[file.originalname] || 'clinical_notes', // Get type from map, default if needed
-            s3_key: file.key, // Key provided by multer-s3
-            s3_bucket: file.bucket, // Bucket provided by multer-s3
-            s3_region: process.env.AWS_S3_REGION,
-            upload_timestamp: new Date(),
-            original_filename: file.originalname,
-            file_size: file.size,
-            content_type: file.contentType,
-        }));
+        // 1. Insert Visit Record
+        const { data: visit, error: visitError } = await supabase
+            .from('visits')
+            .insert({
+                user_id: req.user.id,
+                pseudonym_id: `P-${req.user.id.slice(-4).toUpperCase()}-${Date.now().toString().slice(-4)}`,
+                visit_timestamp: visitTimestamp,
+                visit_type: visit_type || 'initial',
+                chief_complaint: chief_complaint,
+                status: 'requested',
+            })
+            .select()
+            .single();
 
-        const newVisit = new Visit({
-            user: req.user._id,
-            pseudonym_id: `P-${req.user._id.toString().slice(-4).toUpperCase()}-${Date.now().toString().slice(-4)}`, // Example pseudonym
-            visit_timestamp: visitTimestamp,
-            visit_type: visit_type || 'initial', // Default or from form
-            chief_complaint: chief_complaint,
-            ingests: ingests,
-            status: 'requested', // Initial status
-        });
+        if (visitError) throw visitError;
 
-        await newVisit.save();
+        // 2. Upload Files to Supabase Storage and Insert Ingest Records
+        const ingests = [];
 
-        res.status(201).json({ message: "Visit requested successfully", visit: newVisit });
+        for (const file of req.files) {
+            const ingestId = shortUUID.generate();
+            const fileType = parsedDocumentTypeMap[file.originalname] || 'clinical_notes';
+            const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+            const extension = path.extname(file.originalname);
+            const fileName = `${path.basename(file.originalname, extension)}-${uniqueSuffix}${extension}`;
+            const supabaseKey = `patients/${req.user.clerk_id}/visits/${visitTimestamp.toISOString().replace(/[:.]/g, '-')}/${fileType}/${fileName}`;
+
+            // Upload via Supabase Storage
+            const { data: uploadData, error: uploadError } = await supabase.storage
+                .from(bucketName)
+                .upload(supabaseKey, file.buffer, {
+                    contentType: file.mimetype,
+                    upsert: false
+                });
+
+            if (uploadError) throw uploadError;
+
+            // Collect record for bulk insert
+            ingests.push({
+                visit_id: visit.id,
+                ingest_id: ingestId,
+                type: fileType,
+                s3_key: supabaseKey, // Keeping the column name consistent with your previous structure for ease
+                s3_bucket: bucketName,
+                s3_region: 'supabase',
+                original_filename: file.originalname,
+                file_size: file.size,
+                content_type: file.mimetype
+            });
+        }
+
+        // 3. Insert Ingest Records into table
+        if (ingests.length > 0) {
+            const { error: ingestError } = await supabase
+                .from('ingests')
+                .insert(ingests);
+
+            if (ingestError) {
+                console.error("Ingest record error:", ingestError);
+                // Optionally handle cleanup of uploaded files here
+            }
+        }
+
+        // Fetch completed visit with ingests
+        const { data: finalVisit } = await supabase
+            .from('visits')
+            .select('*, ingests(*)')
+            .eq('id', visit.id)
+            .single();
+
+        res.status(201).json({ message: "Visit requested successfully", visit: finalVisit });
 
     } catch (err) {
         console.error("Error creating visit:", err);
-         if (err instanceof multer.MulterError) {
-             return res.status(400).json({ message: `File upload error: ${err.message}` });
-         }
+        if (err instanceof multer.MulterError) {
+            return res.status(400).json({ message: `File upload error: ${err.message}` });
+        }
         res.status(500).json({ message: "Server error creating visit" });
     }
 });
 
-
-// Start Server
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, () => console.log(`Server started on port ${PORT}`)); //
+app.listen(PORT, () => console.log(`Supabase Server started on port ${PORT}`));

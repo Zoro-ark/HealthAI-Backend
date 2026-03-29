@@ -12,17 +12,16 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.917.0",
+    "@supabase/supabase-js": "^2.100.1",
     "bcryptjs": "^3.0.2",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
-    "mongoose": "^8.19.2",
+    "i": "^0.3.7",
     "multer": "^2.0.2",
-    "multer-s3": "^3.0.1",
     "short-uuid": "^5.2.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.1.14"
   }
 }
