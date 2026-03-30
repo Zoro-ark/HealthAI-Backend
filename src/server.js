@@ -162,10 +162,70 @@ app.get("/api/user/status", (req, res) => {
         res.status(200).json({
             isVerified: req.user.is_verified || false,
             clerkId: req.user.clerk_id,
-            userId: req.user.id
+            userId: req.user.id,
+            assignedDoctorName: req.user.assigned_doctor_name || null
         });
     } else {
         res.status(200).json({ isVerified: false, clerkId: null, userId: null });
+    }
+});
+
+// --- Admin: Get Verified Patients ---
+app.get("/api/admin/patients", async (req, res) => {
+    // Basic auth check - ideally you'd also check if req.user.role === 'admin'
+    if (!req.user || req.user.role !== 'admin') {
+        return res.status(403).json({ message: "Forbidden: Admin access only" });
+    }
+
+    try {
+        // Fetch all verified patients and their visits to see symptoms
+        const { data: patients, error } = await supabase
+            .from('users')
+            .select(`
+                *,
+                visits(chief_complaint, visit_timestamp)
+            `)
+            .eq('is_verified', true)
+            .in('role', ['patient', 'user']);
+
+        if (error) throw error;
+        
+        res.status(200).json(patients);
+    } catch (err) {
+        console.error("Error fetching admin patients:", err);
+        res.status(500).json({ message: "Server error fetching patients" });
+    }
+});
+
+// --- Admin: Assign Doctor to Patient ---
+app.post("/api/admin/assign", async (req, res) => {
+    if (!req.user || req.user.role !== 'admin') {
+        return res.status(403).json({ message: "Forbidden: Admin access only" });
+    }
+
+    try {
+        const { patientId, doctorId, doctorName } = req.body;
+
+        if (!patientId || !doctorId || !doctorName) {
+            return res.status(400).json({ message: "Missing required assignment fields" });
+        }
+
+        const { data: updatedUser, error } = await supabase
+            .from('users')
+            .update({
+                assigned_doctor_id: doctorId,
+                assigned_doctor_name: doctorName
+            })
+            .eq('id', patientId)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.status(200).json({ message: "Doctor assigned successfully", patient: updatedUser });
+    } catch (err) {
+        console.error("Error assigning doctor:", err);
+        res.status(500).json({ message: "Server error during doctor assignment" });
     }
 });
 
