@@ -84,7 +84,12 @@ app.get("/", (req, res) => {
 
 app.post("/api/addUser", async (req, res) => {
     try {
-        const { clerkId, email, name, role } = req.body;
+        let { clerkId, email, name, role } = req.body;
+
+        // Map 'patient' to 'user' to bypass strict Supabase CHECK constraint
+        if (role === 'patient') {
+            role = 'user';
+        }
 
         if (!clerkId || !email || !name) {
             return res.status(400).json({ message: "Missing required fields: clerkId, email, name" });
@@ -118,7 +123,7 @@ app.post("/api/addUser", async (req, res) => {
         return res.status(200).json({ message: "User already exists", user: existingUser });
     } catch (err) {
         console.error("Add user error:", err);
-        return res.status(500).json({ message: "Server error" });
+        return res.status(500).json({ message: err.message || "Server error" });
     }
 });
 
@@ -226,6 +231,57 @@ app.post("/api/admin/assign", async (req, res) => {
     } catch (err) {
         console.error("Error assigning doctor:", err);
         res.status(500).json({ message: "Server error during doctor assignment" });
+    }
+});
+
+// --- Admin: Get All Doctor Verifications ---
+app.get("/api/admin/doctors", async (req, res) => {
+    if (!req.user || req.user.role !== 'admin') {
+        return res.status(403).json({ message: "Forbidden: Admin access only" });
+    }
+
+    try {
+        const { data: doctors, error } = await supabase
+            .from('doctor_verifications')
+            .select('*')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        
+        res.status(200).json(doctors);
+    } catch (err) {
+        console.error("Error fetching doctor verifications:", err);
+        res.status(500).json({ message: "Server error fetching doctor verifications" });
+    }
+});
+
+// --- Admin: Update Doctor Verification Status ---
+app.put("/api/admin/doctors/:id/status", async (req, res) => {
+    if (!req.user || req.user.role !== 'admin') {
+        return res.status(403).json({ message: "Forbidden: Admin access only" });
+    }
+
+    try {
+        const { id } = req.params;
+        const { status } = req.body;
+
+        if (!['pending', 'verified', 'rejected'].includes(status)) {
+            return res.status(400).json({ message: "Invalid status value" });
+        }
+
+        const { data: updatedDoctor, error } = await supabase
+            .from('doctor_verifications')
+            .update({ status })
+            .eq('id', id)
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.status(200).json({ message: `Doctor ${status}`, doctor: updatedDoctor });
+    } catch (err) {
+        console.error("Error updating doctor status:", err);
+        res.status(500).json({ message: "Server error updating doctor status" });
     }
 });
 
