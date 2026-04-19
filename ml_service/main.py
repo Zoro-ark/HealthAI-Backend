@@ -24,6 +24,21 @@ CT_BUNDLE_DIR = BUNDLE_ROOT / "wholeBody_ct_segmentation"
 MRI_BUNDLE_DIR = BUNDLE_ROOT / "brats_mri_segmentation"
 
 
+def ensure_monai_bundle(bundle_name: str, repo: str, bundle_dir: Path) -> None:
+    if (bundle_dir / "configs" / "metadata.json").exists() and (bundle_dir / "models" / "model.pt").exists():
+        return
+
+    from monai.bundle.scripts import download
+
+    BUNDLE_ROOT.mkdir(parents=True, exist_ok=True)
+    download(
+        name=bundle_name,
+        source="huggingface_hub",
+        repo=repo,
+        bundle_dir=str(BUNDLE_ROOT),
+    )
+
+
 class PatientContext(BaseModel):
     id: str
     name: str
@@ -142,6 +157,7 @@ def autocast_context(torch_module: Any, enabled: bool):
 
 @lru_cache(maxsize=1)
 def get_ct_metadata() -> dict[str, str]:
+    ensure_monai_bundle("wholeBody_ct_segmentation", "MONAI/wholeBody_ct_segmentation", CT_BUNDLE_DIR)
     metadata = json.loads((CT_BUNDLE_DIR / "configs" / "metadata.json").read_text())
     outputs = metadata["network_data_format"]["outputs"]["pred"]["channel_def"]
     return {key: value.replace("_", " ") for key, value in outputs.items()}
@@ -149,6 +165,7 @@ def get_ct_metadata() -> dict[str, str]:
 
 @lru_cache(maxsize=1)
 def get_mri_metadata() -> dict[str, str]:
+    ensure_monai_bundle("brats_mri_segmentation", "MONAI/brats_mri_segmentation", MRI_BUNDLE_DIR)
     metadata = json.loads((MRI_BUNDLE_DIR / "configs" / "metadata.json").read_text())
     outputs = metadata["network_data_format"]["outputs"]["pred"]["channel_def"]
     return {key: value for key, value in outputs.items()}
