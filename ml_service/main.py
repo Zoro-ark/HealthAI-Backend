@@ -349,7 +349,7 @@ def gemini_summary(
     )
 
     last_error = None
-    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash-latest", "gemini-1.5-pro-latest"):
+    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash"):
         for attempt in range(2):
             try:
                 response = client.models.generate_content(
