@@ -725,12 +725,22 @@ async def analyze(payload: AnalysisRequest):
     try:
         summary = gemini_summary(payload.patient, findings, imaging_findings, payload.doctor_suggestions)
     except Exception as gemini_exc:
-        limitations.append(f"Gemini summary unavailable, falling back to BioGPT: {gemini_exc}")
-        try:
-            summary = biogpt_summary(payload.patient, findings, imaging_findings, payload.doctor_suggestions)
-        except Exception as exc:
-            summary = ""
-            limitations.append(f"BioGPT summary generation also failed: {exc}")
+        limitations.append(f"Gemini summary unavailable: {gemini_exc}")
+        # Build structured fallback directly from pipeline data (skip BioGPT — poor quality)
+        parts = []
+        parts.append(f"1. CLINICAL PRESENTATION: {payload.patient.name}, {payload.patient.age or 'unknown'} y/o {payload.patient.gender or 'unknown'}. Chief complaint: {payload.patient.symptoms or 'not provided'}.")
+        if findings:
+            parts.append("\n2. KEY FINDINGS (ClinicalBERT NLP-extracted):")
+            for f in findings[:5]:
+                parts.append(f"  - {f}")
+        if imaging_findings:
+            parts.append("\n3. IMAGING CORRELATION:")
+            for img in imaging_findings:
+                parts.append(f"  - {img.get('document_name', 'unknown')}: {img.get('summary', 'N/A')}")
+        if payload.doctor_suggestions:
+            parts.append(f"\n4. PHYSICIAN NOTES: {payload.doctor_suggestions}")
+        parts.append("\n[Note: Full AI-generated summary was temporarily unavailable due to API capacity. The above findings are extracted directly from uploaded documents via OCR + ClinicalBERT + imaging models. Please review, edit, and augment before submitting.]")
+        summary = "\n".join(parts)
 
     if not summary:
         # Build a structured fallback from actual pipeline data
