@@ -9,6 +9,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
 import httpx
 import nibabel as nib
 import numpy as np
@@ -290,6 +294,65 @@ def biogpt_summary(
     decoded = tokenizer.decode(output[0], skip_special_tokens=True)
     summary = decoded.split("Summary:", 1)[-1].strip()
     return summary[:1800]
+
+
+def gemini_summary(
+    patient: PatientContext,
+    findings: list[str],
+    imaging_findings: list[dict[str, Any]],
+    doctor_suggestions: str | None,
+) -> str:
+    """Generate a medical summary using the Gemini API."""
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set.")
+
+    from google import genai
+
+    client = genai.Client(api_key=api_key)
+
+    imaging_text = "\n".join(
+        f"- {item['document_name']}: {item['summary']}" for item in imaging_findings if item.get("summary")
+    )
+    findings_text = "\n".join(f"- {finding}" for finding in findings)
+
+    prompt = (
+        "You are a board-certified clinical decision support system generating a summary "
+        "for a reviewing physician. Write a structured clinical summary (200-300 words) "
+        "using standard medical documentation format. Target audience: attending physician.\n\n"
+        "FORMAT:\n"
+        "1. CLINICAL PRESENTATION: Brief HPI with demographics and chief complaint.\n"
+        "2. KEY FINDINGS: Synthesize ClinicalBERT NLP-extracted findings. Note pathological "
+        "keywords, abnormal values, and medication interactions.\n"
+        "3. IMAGING CORRELATION: Interpret imaging model outputs. Cite confidence scores. "
+        "Correlate imaging findings with textual findings where applicable.\n"
+        "4. DIFFERENTIAL DIAGNOSIS: List 2-4 differential diagnoses ranked by likelihood "
+        "based on the combined evidence. Use clinical reasoning.\n"
+        "5. RECOMMENDED WORKUP: Suggest next diagnostic steps (labs, imaging, referrals) "
+        "based on the differentials.\n\n"
+        "RULES:\n"
+        "- Use standard medical abbreviations (CXR, RML, CBC, CRP, etc.)\n"
+        "- Never state a definitive diagnosis; use 'consistent with', 'suggestive of', "
+        "'cannot exclude'\n"
+        "- Reference specific findings from the data provided below\n"
+        "- Do NOT use markdown formatting, headers, or bullet symbols. "
+        "Write in continuous clinical prose with numbered sections.\n\n"
+        f"PATIENT: {patient.name}, {patient.age or 'unknown'} y/o {patient.gender or 'unknown'}.\n"
+        f"CHIEF COMPLAINT / HPI: {patient.symptoms or 'not provided'}.\n\n"
+        "NLP-EXTRACTED FINDINGS (ClinicalBERT, ranked by semantic relevance):\n"
+        f"{findings_text or 'No textual findings extracted from uploaded documents.'}\n\n"
+        "IMAGING MODEL OUTPUTS:\n"
+        f"{imaging_text or 'No imaging analysis performed.'}\n\n"
+        f"ADDITIONAL CLINICAL CONTEXT FROM REFERRING PHYSICIAN: {doctor_suggestions or 'None provided.'}\n\n"
+        "Generate the clinical summary now."
+    )
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt,
+    )
+    summary = (response.text or "").strip()
+    return summary[:2500]
 
 
 @lru_cache(maxsize=1)
@@ -643,10 +706,14 @@ async def analyze(payload: AnalysisRequest):
         limitations.append("ClinicalBERT did not produce ranked findings from the extracted text.")
 
     try:
-        summary = biogpt_summary(payload.patient, findings, imaging_findings, payload.doctor_suggestions)
-    except Exception as exc:
-        summary = ""
-        limitations.append(f"BioGPT summary generation failed: {exc}")
+        summary = gemini_summary(payload.patient, findings, imaging_findings, payload.doctor_suggestions)
+    except Exception as gemini_exc:
+        limitations.append(f"Gemini summary unavailable, falling back to BioGPT: {gemini_exc}")
+        try:
+            summary = biogpt_summary(payload.patient, findings, imaging_findings, payload.doctor_suggestions)
+        except Exception as exc:
+            summary = ""
+            limitations.append(f"BioGPT summary generation also failed: {exc}")
 
     if not summary:
         summary = (
