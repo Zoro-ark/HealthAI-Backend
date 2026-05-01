@@ -349,27 +349,25 @@ def gemini_summary(
     )
 
     last_error = None
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
-            summary = (response.text or "").strip()
-            return summary[:2500]
-        except Exception as e:
-            last_error = e
-            error_str = str(e)
-            # Retry on 503 (overloaded) or 429 (rate limit)
-            if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str:
-                wait_time = 2 ** attempt  # 1s, 2s, 4s
-                time.sleep(wait_time)
-                continue
-            else:
-                raise  # Non-retryable error, propagate immediately
+    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash"):
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                summary = (response.text or "").strip()
+                return summary[:2500]
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str:
+                    time.sleep((attempt + 1) * 2)
+                    continue
+                else:
+                    raise
 
-    # All retries exhausted
-    raise RuntimeError(f"Gemini API failed after 3 retries: {last_error}")
+    raise RuntimeError(f"Gemini API failed after all retries: {last_error}")
 
 
 @lru_cache(maxsize=1)
