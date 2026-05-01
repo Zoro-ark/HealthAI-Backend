@@ -349,7 +349,7 @@ def gemini_summary(
     )
 
     last_error = None
-    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash"):
+    for model_name in ("gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash", "gemini-1.5-pro"):
         for attempt in range(2):
             try:
                 response = client.models.generate_content(
@@ -361,7 +361,7 @@ def gemini_summary(
             except Exception as e:
                 last_error = e
                 error_str = str(e)
-                if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str:
+                if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                     time.sleep((attempt + 1) * 2)
                     continue
                 else:
