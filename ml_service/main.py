@@ -3,6 +3,7 @@ import json
 import os
 import re
 import tempfile
+import time
 import zipfile
 from contextlib import nullcontext
 from functools import lru_cache
@@ -347,12 +348,28 @@ def gemini_summary(
         "Generate the clinical summary now."
     )
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
-    summary = (response.text or "").strip()
-    return summary[:2500]
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+            )
+            summary = (response.text or "").strip()
+            return summary[:2500]
+        except Exception as e:
+            last_error = e
+            error_str = str(e)
+            # Retry on 503 (overloaded) or 429 (rate limit)
+            if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str:
+                wait_time = 2 ** attempt  # 1s, 2s, 4s
+                time.sleep(wait_time)
+                continue
+            else:
+                raise  # Non-retryable error, propagate immediately
+
+    # All retries exhausted
+    raise RuntimeError(f"Gemini API failed after 3 retries: {last_error}")
 
 
 @lru_cache(maxsize=1)
@@ -716,10 +733,21 @@ async def analyze(payload: AnalysisRequest):
             limitations.append(f"BioGPT summary generation also failed: {exc}")
 
     if not summary:
-        summary = (
-            "Automated summary could not be generated completely. Review the OCR text, ClinicalBERT findings, "
-            "and imaging outputs manually before sending the report."
-        )
+        # Build a structured fallback from actual pipeline data
+        parts = []
+        parts.append(f"PATIENT: {payload.patient.name}, {payload.patient.age or 'unknown'} y/o {payload.patient.gender or 'unknown'}.")
+        if payload.patient.symptoms:
+            parts.append(f"CHIEF COMPLAINT: {payload.patient.symptoms}.")
+        if findings:
+            parts.append("\nKEY FINDINGS (ClinicalBERT):")
+            for f in findings[:5]:
+                parts.append(f"- {f}")
+        if imaging_findings:
+            parts.append("\nIMAGING FINDINGS:")
+            for img in imaging_findings:
+                parts.append(f"- {img.get('document_name', 'unknown')}: {img.get('summary', 'N/A')}")
+        parts.append("\nNote: Automated AI summary generation was temporarily unavailable. The above findings are extracted directly from the uploaded documents. Please review and edit before submitting.")
+        summary = "\n".join(parts)
 
     return AnalysisResponse(
         ocr_text=merged_text,
